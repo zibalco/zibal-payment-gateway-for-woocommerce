@@ -8,6 +8,11 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
   class WC_Gateway_Zibal extends WC_Payment_Gateway
   {
 
+    const TRACK_ID_META_KEY = '_zibal_track_id';
+    const REQUESTED_AMOUNT_META_KEY = '_zibal_requested_amount';
+    const PAYMENT_STATE_META_KEY = '_zibal_payment_state';
+    const VERIFY_LOCK_PREFIX = 'zibal_verify_lock_';
+
     private $pin;
     private $sandbox;
     private $success_massage;
@@ -42,8 +47,8 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
       } else {
         add_action('woocommerce_update_options_payment_gateways', array($this, 'process_admin_options'));
       }
-      add_action('woocommerce_receipt_' . $this->id . '', array($this, 'Send_to_zibal_Gateway'));
-      add_action('woocommerce_api_' . strtolower(get_class($this)) . '', array($this, 'Return_from_zibal_Gateway'));
+      add_action('woocommerce_receipt_' . $this->id, array($this, 'Send_to_zibal_Gateway'));
+      add_action('woocommerce_api_' . strtolower($this->id), array($this, 'Return_from_zibal_Gateway'));
       if (is_admin() && $this->settings['sandbox'] === 'yes') {
         add_action('admin_bar_menu', array($this, 'add_sandbox_notice_to_admin_bar'), 100);
       }
@@ -130,98 +135,109 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
 
     public function process_payment($order_id)
     {
-      $order = new WC_Order($order_id);
+      $order = wc_get_order($order_id);
+      if (!$order) {
+        return array('result' => 'failure');
+      }
       return array(
         'result' => 'success',
         'redirect' => $order->get_checkout_payment_url(true)
       );
     }
 
-    private function silent_curl_with_fallback($primary_url, $secondary_url, $data)
+    private function api_request_with_fallback($endpoint, $data, &$used_base_url = '', &$raw_response = '')
     {
-      $payload = json_encode($data);
+      $api_bases = array('https://gateway.zibal.ir', 'https://gateway.zibal.io');
+      $errors = array();
 
-      $exec = function ($url) use ($payload) {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-          CURLOPT_RETURNTRANSFER => true,
-          CURLOPT_POST => true,
-          CURLOPT_POSTFIELDS => $payload,
-          CURLOPT_HTTPHEADER => [
-            'Content-Type: application/json',
-            'Content-Length: ' . strlen($payload)
-          ],
-          CURLOPT_CONNECTTIMEOUT => 5,
-          CURLOPT_TIMEOUT => 10,
-          CURLOPT_SSL_VERIFYPEER => false,
-          CURLOPT_SSL_VERIFYHOST => false
-        ]);
+      foreach ($api_bases as $api_base) {
+        $response = wp_remote_post(
+          $api_base . '/v1/' . ltrim($endpoint, '/'),
+          array(
+            'body' => wp_json_encode($data),
+            'headers' => array(
+              'Content-Type' => 'application/json',
+              'User-Agent' => apply_filters('WC_Gateway_Zibal_User_Agent', 'Zibal-WooCommerce-Plugin/2.0'),
+            ),
+            'timeout' => 'https://gateway.zibal.ir' === $api_base ? 20 : 10,
+            'redirection' => 0,
+            'sslverify' => false,
+            'data_format' => 'body',
+          )
+        );
 
-        $response = curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_errno($ch);
-        curl_close($ch);
-
-        if ($error || !$response || $http_code != 200) {
-          return false;
+        if (is_wp_error($response)) {
+          $errors[] = $api_base . ': ' . $response->get_error_message();
+          continue;
         }
 
-        $json_check = json_decode($response);
-        if ($json_check === null && json_last_error() !== JSON_ERROR_NONE) {
-          return false;
+        $status_code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+        $result = json_decode($body);
+
+        if ($status_code >= 500 || empty($body) || !is_object($result)) {
+          $errors[] = sprintf('%s [HTTP %d]: %s', $api_base, $status_code, $body ? $body : 'Empty response');
+          continue;
         }
 
-        return $response;
-      };
-
-      $result = $exec($primary_url);
-
-      if ($result === false && !empty($secondary_url)) {
-        $result = $exec($secondary_url);
+        $used_base_url = $api_base;
+        $raw_response = $body;
+        return $result;
       }
 
-      return $result;
+      $error_details = !empty($errors) ? implode(' | ', $errors) : 'No response from Zibal endpoints';
+      return new WP_Error('zibal_connection_error', $error_details);
     }
 
-    private function redirect_to_gateway_with_fallback($trackId)
+    private function redirect_to_gateway($base_url, $track_id)
     {
-      $payment_urls = [
-        sprintf('https://gateway.zibal.ir/start/%s', $trackId),
-        sprintf('https://gateway.zibal.io/start/%s', $trackId)
-      ];
+      $url = trailingslashit($base_url) . 'start/' . rawurlencode($track_id);
+      wp_redirect($url);
+      exit;
+    }
 
-      foreach ($payment_urls as $url) {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-          CURLOPT_RETURNTRANSFER => true,
-          CURLOPT_NOBODY => true,
-          CURLOPT_CONNECTTIMEOUT => 3,
-          CURLOPT_TIMEOUT => 5,
-          CURLOPT_SSL_VERIFYPEER => false,
-          CURLOPT_SSL_VERIFYHOST => false
-        ]);
+    private function acquire_verification_lock($order_id)
+    {
+      $lock_key = self::VERIFY_LOCK_PREFIX . absint($order_id);
+      $created_at = (int) get_option($lock_key, 0);
 
-        curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_errno($ch);
-        curl_close($ch);
-
-        if (!$error && ($http_code == 200 || $http_code == 302 || $http_code == 301)) {
-          wp_redirect($url);
-          exit;
-        }
+      if ($created_at && (time() - $created_at) > 60) {
+        delete_option($lock_key);
       }
 
-      wp_redirect($payment_urls[0]);
+      return add_option($lock_key, time(), '', 'no');
+    }
+
+    private function release_verification_lock($order_id)
+    {
+      delete_option(self::VERIFY_LOCK_PREFIX . absint($order_id));
+    }
+
+    private function reject_callback($order, $admin_message, $customer_message)
+    {
+      if ($order) {
+        $order->add_order_note($admin_message);
+      }
+
+      wc_add_notice($customer_message, 'error');
+      wp_redirect(wc_get_checkout_url());
       exit;
     }
 
     public function Send_to_zibal_Gateway($order_id)
     {
       ob_start();
+      $Message = '';
+      $Fault = '';
+      $Customer_Message = '';
+      $raw_response = '';
       global $woocommerce;
       $woocommerce->session->order_id_zibal = $order_id;
-      $order = new WC_Order($order_id);
+      $order = wc_get_order($order_id);
+      if (!$order) {
+        wc_add_notice(__('اطلاعات سفارش معتبر نیست؛ لطفاً دوباره تلاش کنید.', 'woocommerce'), 'error');
+        return false;
+      }
       $currency = $order->get_currency();
       $currency = apply_filters('WC_Gateway_Zibal_Currency', $currency, $order_id);
       $action = $this->author;
@@ -238,13 +254,7 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
 
       $action = $this->author;
       do_action('WC_Gateway_Payment_Actions', $action);
-      if (!extension_loaded('curl')) {
-        $order->add_order_note(__('تابع cURL روی هاست شما فعال نیست .', 'woocommerce'));
-        wc_add_notice(__('تابع cURL روی هاست فروشنده فعال نیست .', 'woocommerce'), 'error');
-        return false;
-      }
-
-      $Amount = intval($order->order_total);
+      $Amount = intval($order->get_total());
       $Amount = apply_filters('woocommerce_order_amount_total_IRANIAN_gateways_before_check_currency', $Amount, $currency);
       if (
         strtolower($currency) == strtolower('IRT') || strtolower($currency) == strtolower('TOMAN') || strtolower($currency) == strtolower('Iran TOMAN') || strtolower($currency) == strtolower('Iranian TOMAN') || strtolower($currency) == strtolower('Iran-TOMAN') || strtolower($currency) == strtolower('Iranian-TOMAN') || strtolower($currency) == strtolower('Iran_TOMAN') || strtolower($currency) == strtolower('Iranian_TOMAN') || strtolower($currency) == strtolower('تومان') || strtolower($currency) == strtolower('تومان ایران')
@@ -273,17 +283,20 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
       $Description = apply_filters('WC_Gateway_Zibal_Description', $Description, $order_id);
       do_action('WC_Gateway_Zibal_Gateway_Payment', $order_id, $Description);
 
-      $CallbackURL = add_query_arg('wc_order', $order_id, WC()->api_request_url('WC_Gateway_Zibal'));
+      $CallbackURL = add_query_arg(
+        array(
+          'wc_order' => $order_id,
+          'key' => $order->get_order_key(),
+        ),
+        WC()->api_request_url('WC_Gateway_Zibal')
+      );
 
       $Sandbox = $this->sandbox;
       $apiID = $Sandbox == "yes" ? 'zibal' : $this->pin;
 
-      $primary_url   = 'https://gateway.zibal.ir/v1/request';
-      $secondary_url = 'https://gateway.zibal.io/v1/request';
-
-      $response = $this->silent_curl_with_fallback(
-        $primary_url,
-        $secondary_url,
+      $gateway_base_url = '';
+      $result = $this->api_request_with_fallback(
+        'request',
         [
           'merchant' => $apiID,
           'amount' => $Amount,
@@ -292,30 +305,44 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
           'mobile' => $Tell,
           'email' => $Email,
           'description' => $Description
-        ]
+        ],
+        $gateway_base_url,
+        $raw_response
       );
 
-      $result = json_decode($response);
-
-      if ($result === false) {
-        $Message = 'خطا در اتصال به درگاه پرداخت';
-        $Fault = 'cURL Error';
+      if (is_wp_error($result)) {
+        $Message = $result->get_error_message();
+        $Fault = $result->get_error_code();
+        $Customer_Message = __('خطا در اتصال به زیبال، لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce');
       } else {
-        if ($result->result == "100") {
-          $this->redirect_to_gateway_with_fallback($result->trackId);
+        if (isset($result->result, $result->trackId) && "100" == $result->result) {
+          $order->update_meta_data(self::TRACK_ID_META_KEY, (string) $result->trackId);
+          $order->update_meta_data(self::REQUESTED_AMOUNT_META_KEY, (int) $Amount);
+          $order->update_meta_data(self::PAYMENT_STATE_META_KEY, 'requested');
+          $order->save();
+          $this->redirect_to_gateway($gateway_base_url, $result->trackId);
+        } elseif (isset($result->result) && "100" == $result->result) {
+          $Fault = 'missing_track_id';
+          $Message = 'زیبال نتیجه موفق برگرداند، اما trackId در پاسخ موجود نیست.';
+          $Customer_Message = __('ایجاد پرداخت ناموفق بود، لطفاً دوباره تلاش کنید.', 'woocommerce');
+          $raw_response = '';
         } else {
-          $Message = ' تراکنش ناموفق بود- کد خطا : ' . $result->result;
-          $Fault = $result->result;
+          $Fault = isset($result->result) ? $result->result : 'invalid_response';
+          $Message = isset($result->message) ? (string) $result->message : 'تراکنش ناموفق بود- کد خطا : ' . $Fault;
+          $Customer_Message = __('ایجاد پرداخت ناموفق بود، لطفاً دوباره تلاش کنید.', 'woocommerce');
         }
       }
 
       if (!empty($Message) && $Message) {
 
-        $Note = sprintf(__('خطا در هنگام ارسال به بانک : %s', 'woocommerce'), $Message);
+        $Note = sprintf(__('خطا در هنگام ارسال به زیبال: %s', 'woocommerce'), esc_html($Message));
+        if ($raw_response) {
+          $Note .= '<br/>' . sprintf(__('پاسخ زیبال: %s', 'woocommerce'), esc_html($raw_response));
+        }
         $Note = apply_filters('WC_Gateway_Zibal_Send_to_Gateway_Failed_Note', $Note, $order_id, $Fault);
         $order->add_order_note($Note);
 
-        $Notice = sprintf(__('در هنگام اتصال به بانک خطای زیر رخ داده است : <br/>%s', 'woocommerce'), $Message);
+        $Notice = $Customer_Message;
         $Notice = apply_filters('WC_Gateway_Zibal_Send_to_Gateway_Failed_Notice', $Notice, $order_id, $Fault);
         if ($Notice)
           wc_add_notice($Notice, 'error');
@@ -326,8 +353,16 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
 
     public function Return_from_zibal_Gateway()
     {
+      $Status = 'failed';
+      $Fault = '';
+      $Message = '';
+      $Customer_Message = '';
+      $Transaction_ID = '';
+      $verify_raw_response = '';
+      $verify_base_url = '';
       $success = isset($_GET['success']) ? sanitize_text_field($_GET['success']) : '';
       $trackId = isset($_GET['trackId']) ? sanitize_text_field($_GET['trackId']) : '';
+      $callback_order_key = isset($_GET['key']) ? sanitize_text_field($_GET['key']) : '';
       $tracking_number = isset($_POST['tracking_number']) ? sanitize_text_field($_POST['tracking_number']) : '';
       $card_number = isset($_POST['cardnumber']) ? sanitize_text_field($_POST['cardnumber']) : '';
 
@@ -336,18 +371,79 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
       do_action('WC_Gateway_Payment_Actions', $action);
 
       if (isset($_GET['wc_order']))
-        $order_id = sanitize_text_field($_GET['wc_order']);
+        $order_id = absint($_GET['wc_order']);
       else
-        $order_id = $woocommerce->session->order_id_zibal;
+        $order_id = absint($woocommerce->session->order_id_zibal);
       unset($woocommerce->session->order_id_zibal);
 
       if ($order_id) {
 
-        $order = new WC_Order($order_id);
+        $order = wc_get_order($order_id);
+
+        if (!$order) {
+          $this->reject_callback(false, '', __('اطلاعات سفارش معتبر نیست؛ لطفاً دوباره تلاش کنید.', 'woocommerce'));
+        }
+
+        if ('WC_Gateway_Zibal' !== $order->get_payment_method()) {
+          $this->reject_callback(
+            $order,
+            __('Callback زیبال رد شد: روش پرداخت سفارش متعلق به این درگاه نیست.', 'woocommerce'),
+            __('اطلاعات پرداخت معتبر نیست؛ لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce')
+          );
+        }
+
+        $order_key = (string) $order->get_order_key();
+        if (!$callback_order_key || !$order_key || !hash_equals($order_key, $callback_order_key)) {
+          $this->reject_callback(
+            $order,
+            __('Callback زیبال رد شد: کلید سفارش معتبر نیست.', 'woocommerce'),
+            __('اطلاعات پرداخت معتبر نیست؛ لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce')
+          );
+        }
+
+        $saved_track_id = (string) $order->get_meta(self::TRACK_ID_META_KEY, true);
+        if (!$saved_track_id || !$trackId || !hash_equals($saved_track_id, (string) $trackId)) {
+          $this->reject_callback(
+            $order,
+            sprintf(
+              __('Callback زیبال رد شد: trackId دریافتی (%1$s) با trackId سفارش (%2$s) مطابقت ندارد.', 'woocommerce'),
+              esc_html($trackId),
+              esc_html($saved_track_id)
+            ),
+            __('اطلاعات پرداخت معتبر نیست؛ لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce')
+          );
+        }
+
+        if ($order->is_paid()) {
+          $paid_transaction_id = (string) $order->get_transaction_id();
+          if (!$paid_transaction_id || !hash_equals($paid_transaction_id, $saved_track_id)) {
+            $this->reject_callback(
+              $order,
+              __('Callback تکراری زیبال رد شد: شناسه تراکنش پرداخت‌شده با trackId سفارش مطابقت ندارد.', 'woocommerce'),
+              __('اطلاعات پرداخت معتبر نیست؛ لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce')
+            );
+          }
+
+          $Notice = wpautop(wptexturize($this->success_massage));
+          $Notice = str_replace('{transaction_id}', $saved_track_id, $Notice);
+          wc_add_notice($Notice, 'success');
+          wp_redirect(add_query_arg('wc_status', 'success', $this->get_return_url($order)));
+          exit;
+        }
+
+        $stored_amount = (int) $order->get_meta(self::REQUESTED_AMOUNT_META_KEY, true);
+        if ($stored_amount <= 0) {
+          $order->update_meta_data(self::PAYMENT_STATE_META_KEY, 'review_required');
+          $order->update_status('on-hold', __('مبلغ درخواست‌شده زیبال روی سفارش موجود نیست و پرداخت نیازمند بررسی مدیر است.', 'woocommerce'));
+          $order->save();
+          wc_add_notice(__('وضعیت پرداخت شما نیازمند بررسی است؛ لطفاً با مدیر سایت تماس بگیرید.', 'woocommerce'), 'notice');
+          wp_redirect($this->get_return_url($order));
+          exit;
+        }
         $currency = $order->get_currency();
         $currency = apply_filters('WC_Gateway_Zibal_Currency', $currency, $order_id);
 
-        $Amount = intval($order->order_total);
+        $Amount = intval($order->get_total());
         $Amount = apply_filters('woocommerce_order_amount_total_IRANIAN_gateways_before_check_currency', $Amount, $currency);
         if (
           strtolower($currency) == strtolower('IRT') || strtolower($currency) == strtolower('TOMAN') || strtolower($currency) == strtolower('Iran TOMAN') || strtolower($currency) == strtolower('Iranian TOMAN') || strtolower($currency) == strtolower('Iran-TOMAN') || strtolower($currency) == strtolower('Iranian-TOMAN') || strtolower($currency) == strtolower('Iran_TOMAN') || strtolower($currency) == strtolower('Iranian_TOMAN') || strtolower($currency) == strtolower('تومان') || strtolower($currency) == strtolower('تومان ایران')
@@ -362,70 +458,109 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
 
         $Amount = apply_filters('woocommerce_order_amount_total_IRANIAN_gateways_after_check_currency', $Amount, $currency);
 
+        if ((int) $Amount !== $stored_amount) {
+          $this->reject_callback(
+            $order,
+            sprintf(
+              __('Callback زیبال رد شد: مبلغ فعلی سفارش (%1$d) با مبلغ زمان ایجاد تراکنش (%2$d) مطابقت ندارد.', 'woocommerce'),
+              (int) $Amount,
+              $stored_amount
+            ),
+            __('مبلغ پرداخت با سفارش مطابقت ندارد؛ لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce')
+          );
+        }
+
         $Sandbox = $this->sandbox;
         $apiID = $Sandbox == "yes" ? 'zibal' : $this->pin;
 
-        if ($order->status != 'completed') {
+        if (!$order->is_paid()) {
           if ($success == '1') {
 
-            $primary_url   = 'https://gateway.zibal.ir/v1/verify';
-            $secondary_url = 'https://gateway.zibal.io/v1/verify';
+            if (!$this->acquire_verification_lock($order_id)) {
+              wc_add_notice(__('پرداخت شما در حال بررسی است؛ لطفاً چند لحظه صبر کنید.', 'woocommerce'), 'notice');
+              wp_redirect($this->get_return_url($order));
+              exit;
+            }
 
-            $response = $this->silent_curl_with_fallback(
-              $primary_url,
-              $secondary_url,
+            $result = $this->api_request_with_fallback(
+              'verify',
               [
                 'merchant' => $apiID,
                 'trackId' => $trackId
-              ]
+              ],
+              $verify_base_url,
+              $verify_raw_response
             );
 
-            $result = json_decode($response);
-
-            if ($result === false) {
+            if (is_wp_error($result)) {
               $Status = 'failed';
-              $Fault = 'cURL Error';
-              $Message = 'خطا در اتصال به درگاه پرداخت';
-            } elseif ($result->result == "100" && $result->amount == $Amount) {
+              $Fault = $result->get_error_code();
+              $Message = $result->get_error_message();
+              $Customer_Message = __('خطا در اتصال به زیبال، لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce');
+            } elseif (isset($result->result, $result->amount) && $result->result == "100" && $result->amount == $Amount) {
               $Status = 'completed';
               $Transaction_ID = $trackId;
               $verify_cardnum = $card_number;
               $verify_tracking = $tracking_number;
               $Fault = '';
               $Message = '';
-            } elseif ($result->result == "201") {
+            } elseif (isset($result->result) && $result->result == "100") {
+              $Status = 'failed';
+              $Fault = 'amount_mismatch';
+              $Message = sprintf(
+                'مغایرت مبلغ پرداخت: مبلغ اعلامی زیبال %1$s و مبلغ مورد انتظار سفارش %2$s است.',
+                isset($result->amount) ? (string) $result->amount : 'نامشخص',
+                (string) $Amount
+              );
+              $Customer_Message = __('مبلغ پرداخت با سفارش مطابقت ندارد؛ لطفاً به مدیر سایت اطلاع دهید.', 'woocommerce');
+              $verify_raw_response = '';
+            } elseif (isset($result->result) && $result->result == "201") {
 
-              $Message = 'این تراکنش قبلا تایید شده است';
-              $Notice = wpautop(wptexturize($Message));
-              wp_redirect(add_query_arg('wc_status', 'success', $this->get_return_url($order)));
+              $Message = isset($result->message) ? (string) $result->message : 'این تراکنش قبلا تایید شده است';
+              $order->update_meta_data(self::PAYMENT_STATE_META_KEY, 'review_required');
+              $order->update_status(
+                'on-hold',
+                sprintf(
+                  __('زیبال نتیجه 201 برگرداند، اما سفارش در ووکامرس پرداخت‌شده نیست. trackId: %s. پاسخ: %s', 'woocommerce'),
+                  esc_html($saved_track_id),
+                  esc_html($verify_raw_response)
+                )
+              );
+              $order->save();
+              $this->release_verification_lock($order_id);
+              wc_add_notice(__('پرداخت شما توسط زیبال قبلاً تأیید شده و اکنون نیازمند بررسی مدیر سایت است.', 'woocommerce'), 'notice');
+              wp_redirect($this->get_return_url($order));
               exit;
             } else {
               $Status = 'failed';
-              $Fault = $result->result;
-              $Message = 'تراکنش ناموفق بود';
+              $Fault = isset($result->result) ? $result->result : 'invalid_response';
+              $Message = isset($result->message) ? (string) $result->message : 'تراکنش ناموفق بود- کد خطا : ' . $Fault;
+              $Customer_Message = __('پرداخت ناموفق بود، لطفاً دوباره تلاش کنید.', 'woocommerce');
             }
           } else {
             $Status = 'failed';
-            $Fault = '';
-            $Message = 'تراکنش انجام نشد .';
+            $Fault = 'payment_cancelled';
+            $Message = 'پرداخت توسط کاربر لغو شد.';
+            $Customer_Message = __('پرداخت توسط شما لغو شد.', 'woocommerce');
           }
 
           if ($Status == 'completed' && isset($Transaction_ID) && $Transaction_ID != 0) {
             $action = $this->author;
             do_action('WC_Gateway_Payment_Actions', $action);
-            update_post_meta($order_id, '_transaction_id', $Transaction_ID);
-            update_post_meta($order_id, '_card_number', $verify_cardnum);
-            update_post_meta($order_id, '_tracking_number', $verify_tracking);
+            $order->update_meta_data('_card_number', $verify_cardnum);
+            $order->update_meta_data('_tracking_number', $verify_tracking);
+            $order->update_meta_data(self::PAYMENT_STATE_META_KEY, 'verified');
 
             $order->payment_complete($Transaction_ID);
+            $order->save();
             $woocommerce->cart->empty_cart();
 
-            $Note = sprintf(__('پرداخت موفقیت آمیز بود .<br/> کد رهگیری : %s', 'woocommerce'), $Transaction_ID);
-            $Note .= sprintf(__('<br/> شماره کارت پرداخت کننده : %s', 'woocommerce'), $verify_cardnum);
-            $Note .= sprintf(__('<br/> شماره تراکنش : %s', 'woocommerce'), $verify_tracking);
+            $Note = sprintf(__('کد رهگیری : %s', 'woocommerce'), $Transaction_ID);
+            $Note .= sprintf(__('<br/>شماره کارت پرداخت کننده : %s', 'woocommerce'), $verify_cardnum);
+            $Note .= sprintf(__('<br/>شماره تراکنش : %s', 'woocommerce'), $verify_tracking);
             $Note = apply_filters('WC_Gateway_Zibal_Return_from_Gateway_Success_Note', $Note, $order_id, $Transaction_ID, $verify_cardnum, $verify_tracking);
             if ($Note)
-              $order->add_order_note($Note, 1);
+              $order->add_order_note($Note);
 
 
             $Notice = wpautop(wptexturize($this->success_massage));
@@ -438,6 +573,7 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
 
             do_action('WC_Gateway_Zibal_Return_from_Gateway_Success', $order_id, $Transaction_ID);
 
+            $this->release_verification_lock($order_id);
             wp_redirect(add_query_arg('wc_status', 'success', $this->get_return_url($order)));
             exit;
           } else {
@@ -446,29 +582,31 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
             do_action('WC_Gateway_Payment_Actions', $action);
             $tr_id = ($Transaction_ID && $Transaction_ID != 0) ? ('<br/>کد تراکنش : ' . $Transaction_ID) : '';
 
-            $Note = sprintf(__('خطا در هنگام بازگشت از بانک : %s %s', 'woocommerce'), $Message, $tr_id);
+            $Note = sprintf(__('خطا در هنگام بازگشت از زیبال : %s %s', 'woocommerce'), esc_html($Message), $tr_id);
+            if ($verify_raw_response) {
+              $Note .= '<br/>' . sprintf(__('پاسخ زیبال: %s', 'woocommerce'), esc_html($verify_raw_response));
+            }
 
             $Note = apply_filters('WC_Gateway_Zibal_Return_from_Gateway_Failed_Note', $Note, $order_id, $Transaction_ID, $Fault);
             if ($Note)
-              $order->add_order_note($Note, 1);
+              $order->add_order_note($Note);
 
-            $Notice = wpautop(wptexturize($this->failed_massage));
-
-            $Notice = str_replace("{transaction_id}", $Transaction_ID, $Notice);
-
-            $Notice = str_replace("{fault}", $Message, $Notice);
+            $Notice = $Customer_Message;
             $Notice = apply_filters('WC_Gateway_Zibal_Return_from_Gateway_Failed_Notice', $Notice, $order_id, $Transaction_ID, $Fault);
             if ($Notice)
               wc_add_notice($Notice, 'error');
 
             do_action('WC_Gateway_Zibal_Return_from_Gateway_Failed', $order_id, $Transaction_ID, $Fault);
 
+            if ($success == '1') {
+              $this->release_verification_lock($order_id);
+            }
             wp_redirect(wc_get_checkout_url());
             exit;
           }
         } else {
 
-          $Transaction_ID = get_post_meta($order_id, '_transaction_id', true);
+          $Transaction_ID = $order->get_transaction_id();
 
           $Notice = wpautop(wptexturize($this->success_massage));
 
@@ -481,14 +619,14 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
 
           do_action('WC_Gateway_Zibal_Return_from_Gateway_ReSuccess', $order_id, $Transaction_ID);
 
+          $this->release_verification_lock($order_id);
           wp_redirect(add_query_arg('wc_status', 'success', $this->get_return_url($order)));
           exit;
         }
       } else {
 
         $Fault = __('شماره سفارش وجود ندارد .', 'woocommerce');
-        $Notice = wpautop(wptexturize($this->failed_massage));
-        $Notice = str_replace("{fault}", $Fault, $Notice);
+        $Notice = __('اطلاعات سفارش معتبر نیست؛ لطفاً دوباره تلاش کنید.', 'woocommerce');
         $Notice = apply_filters('WC_Gateway_Zibal_Return_from_Gateway_No_Order_ID_Notice', $Notice, $order_id, $Fault);
         if ($Notice)
           wc_add_notice($Notice, 'error');

@@ -10,8 +10,8 @@ final class Zibal_Gateway_Blocks extends AbstractPaymentMethodType
 
     public function initialize()
     {
-        $this->settings = get_option('woocommerce_zibal_gateway_settings', []);
         $this->gateway = new WC_Gateway_Zibal();
+        $this->settings = $this->gateway->settings;
     }
 
     public function is_active()
@@ -47,7 +47,8 @@ final class Zibal_Gateway_Blocks extends AbstractPaymentMethodType
         return [
             'title' => $this->gateway->title,
             'description' => $this->gateway->description,
-            'icon' => plugin_dir_url(__FILE__) . '/assets/images/logo.svg'
+            'icon' => plugin_dir_url(__FILE__) . '/assets/images/logo.png',
+            'supports' => array_values($this->gateway->supports),
         ];
     }
 
