@@ -1,38 +1,36 @@
-# Gateway Zibal for WooCommerce
+﻿=== Gateway zibal for Woocommerce ===
+Contributors: mzamanzadah
+Tags: woocommerce,zibal,gateway,payment,زیبال
+Requires at least: 4.5
+Donate link: https://zibal.ir
+Requires at least: 4.5
+Version: 1.9
+Tested up to: 6.7
+Stable tag: 1.9
+License: GPLv3 or later
+License URI: https://www.gnu.org/licenses/gpl-3.0.en.html
 
-نسخه 2.1.0 درگاه پرداخت زیبال برای ووکامرس، با پشتیبانی از Checkout کلاسیک، Checkout Blocks و HPOS.
+با نصب این پلاگین می توانید از خدمات درگاه پرداخت واسط و مستقیم و یا اختصاصی زیبال برروی فروشگاه ساز ووکامرس استفاده کنید
 
-## نیازمندی‌ها
+== Description ==
+ افزونه Zibal Payment Gateway for Woocommerce امکان فروش اینترنتی و آنلاین از طریق درگاه پرداخت زیبال به ووکامرس اضافه می کند. 
 
-- PHP 5.6 یا جدیدتر
-- WordPress 4.7 یا جدیدتر
-- WooCommerce 3.0 یا جدیدتر
 
-برای PHP 5.6 باید از نسخه‌ای از WordPress و WooCommerce استفاده شود که خود آن نسخه همچنان PHP 5.6 را پشتیبانی کند. نسخه‌های جدید WooCommerce حداقل PHP بالاتری دارند.
+== Installation ==
+1. پوشه `zibal-woocommerce-payment-gateway` را در مسیر `/wp-content/plugins/` آپلود کنید
+2. افزونه را از طریق منوی 'افزونه ها' در وردپرس فعال کنید
+3. تنظیمات افزونه را می توانید از طریق قسمت تنظیمات ووکامرس / تسویه حساب انجام دهید
 
-## نصب
 
-1. فایل ZIP افزونه را در بخش افزونه‌های وردپرس بارگذاری کنید.
-2. افزونه را فعال کنید.
-3. از مسیر ووکامرس ← تنظیمات ← پرداخت‌ها، درگاه زیبال را پیکربندی کنید.
+== Changelog ==
+= 1.9 =
+رفع باگ نمایش شماره سفارش در پنل زیبال
+= 1.8 =
+رفع باگ مفایرت گیری
 
-## نکات امنیتی نسخه 2.1.0
+= 1.7 =
+رفع مشکل "عدم وجود روش پرداخت" و  سازگاری با نسخه جدید ووکامرس
 
-- اتصال callback به کلید سفارش، روش پرداخت و trackId ذخیره‌شده
-- verify سمت سرور و کنترل مبلغ قبل از تکمیل سفارش
-- نگهداری چند trackId معتبر برای تلاش‌های پرداخت هم‌زمان
-- قفل اتمیک مرحله verify
-- انتقال وضعیت‌های مشکوک به `on-hold`
-- استفاده از اطلاعات کارت و مرجع پاسخ verify و ماسک‌کردن شماره کارت
-
-## تست سازگاری
-
-اسکریپت `tests/compat-smoke.php` منطق اصلی سازگاری را بررسی می‌کند:
-
-```bash
-php tests/compat-smoke.php
-```
-
-## مجوز
-
-GPLv3 or later
+= 1.5 =
+هماهنگ سازی بخش واحد مالی با واحد مالی در زیبال
+سازگاری با نسخه جدید ووکامرس و وردپرس

@@ -1,7 +1,7 @@
-const zibal_settings = window.wc.wcSettings.getSetting("WC_Gateway_Zibal_data", {});
+const zibal_settings = window.wc.wcSettings.getSetting("WC_Zibal_data", {});
 const zibal_label =
   window.wp.htmlEntities.decodeEntities(zibal_settings.title) ||
-  window.wp.i18n.__("زیبال", "zibal-woocommerce");
+  window.wp.i18n.__("زیبال", "woocommerce");
 
 const Zibal_icon = Object(window.wp.element.createElement)("img", {
   src: zibal_settings.icon,
@@ -22,7 +22,7 @@ const zibal_Content = () => {
 };
 
 const Zibal_Block_Gateway = {
-  name: "WC_Gateway_Zibal",
+  name: "WC_Zibal",
   label: zibal_label_with_icon,
   content: Object(window.wp.element.createElement)(zibal_Content, null),
   edit: Object(window.wp.element.createElement)(zibal_Content, null),
