@@ -1,7 +1,7 @@
 const zibal_settings = window.wc.wcSettings.getSetting("WC_Gateway_Zibal_data", {});
 const zibal_label =
   window.wp.htmlEntities.decodeEntities(zibal_settings.title) ||
-  window.wp.i18n.__("زیبال", "woocommerce");
+  window.wp.i18n.__("زیبال", "zibal-woocommerce");
 
 const Zibal_icon = Object(window.wp.element.createElement)("img", {
   src: zibal_settings.icon,
