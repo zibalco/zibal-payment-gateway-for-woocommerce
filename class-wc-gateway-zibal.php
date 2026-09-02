@@ -505,6 +505,7 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
       $url = trailingslashit($base_url) . 'start/' . rawurlencode($track_id);
 
       if (!headers_sent()) {
+        header('Referrer-Policy: origin');
         wp_redirect($url);
         exit;
       }
@@ -512,9 +513,10 @@ if (class_exists('WC_Payment_Gateway') && !class_exists('WC_Gateway_Zibal')) {
       // 15 combines JSON_HEX_TAG, JSON_HEX_AMP, JSON_HEX_APOS and JSON_HEX_QUOT
       // without referencing constants that may be unavailable on very old PHP.
       $encoded_url = $this->encode_json($url, 15);
+      echo '<meta name="referrer" content="origin">';
       echo '<script>window.location.replace(' . $encoded_url . ');</script>';
       echo '<noscript><meta http-equiv="refresh" content="0;url=' . esc_attr($url) . '"></noscript>';
-      echo '<p><a href="' . esc_url($url) . '">' . esc_html__('برای انتقال به درگاه زیبال اینجا کلیک کنید.', 'zibal-woocommerce') . '</a></p>';
+      echo '<p><a href="' . esc_url($url) . '" referrerpolicy="origin">' . esc_html__('برای انتقال به درگاه زیبال اینجا کلیک کنید.', 'zibal-woocommerce') . '</a></p>';
       exit;
     }
 
